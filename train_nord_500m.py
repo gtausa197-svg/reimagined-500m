@@ -7,14 +7,14 @@
 ║                                                                        ║
 ║  Hardware requirements:                                                ║
 ║      - NVIDIA L40 (48GB) or 4× RTX 3090 (24GB each)                   ║
-║      - ~20-30GB VRAM for training with batch_size=8, seq_len=512       ║
+║      - ~20-30GB VRAM for training with batch_size=2, seq_len=512       ║
 ║                                                                        ║
 ║  Changes from 144M:                                                    ║
 ║      - d_model: 512 → 1024                                            ║
 ║      - n_layers: 6 → 12                                               ║
 ║      - d_ff: 1024 → 4096                                              ║
 ║      - n_heads: 8 → 16                                                ║
-║      - batch_size: 4 → 2 (compensated with grad_accum=4)             ║
+║      - batch_size: 4 → 2 (compensated with grad_accum=16)             ║
 ║      - lr: 5e-4 → 3e-4 (lower for stability at scale)                ║
 ║      - warmup: 500 → 1000 steps                                       ║
 ╚══════════════════════════════════════════════════════════════════════════╝
@@ -39,6 +39,7 @@ import torch
 import torch.nn.functional as F
 from torch.amp import autocast
 from torch.utils.data import Dataset, DataLoader
+from torch.nn.parallel import DataParallel
 
 from nord_core_500m import NordConfig, NordModel
 
@@ -276,9 +277,9 @@ def train(dataset_path: str, model_dir: str):
         persistent_mem=False,
         max_seq_len=512,
         # Training — adjusted for 500M
-        batch_size=8,
-        grad_accum=4,
-        lr=4e-4,           # lower lr for larger model
+        batch_size=2,
+        grad_accum=16,
+        lr=3e-4,           # lower lr for larger model
         warmup_steps=1000,  # longer warmup
         max_steps=200_000,
         save_every=1000,
@@ -289,10 +290,37 @@ def train(dataset_path: str, model_dir: str):
     print("═" * 60)
     print("  PROJECT NORD v3.5 — 500M SNN Model Training")
     print("═" * 60)
-    print(f"  GPU:            {torch.cuda.get_device_name()}" if torch.cuda.is_available() else "  CPU mode")
+
+    n_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    use_multi_gpu = n_gpus > 1
+
     if torch.cuda.is_available():
-        vram = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-        print(f"  VRAM:           {vram:.1f} GB")
+        print(f"  GPUs found:     {n_gpus}")
+        total_vram = 0
+        for i in range(n_gpus):
+            name = torch.cuda.get_device_name(i)
+            vram_i = torch.cuda.get_device_properties(i).total_memory / (1024**3)
+            total_vram += vram_i
+            print(f"    GPU {i}: {name} ({vram_i:.1f} GB)")
+
+        # Auto-adjust batch size based on total VRAM
+        if total_vram >= 160:
+            cfg.batch_size = 16; cfg.grad_accum = 2
+        elif total_vram >= 80:
+            cfg.batch_size = 8; cfg.grad_accum = 4
+        elif total_vram >= 40:
+            cfg.batch_size = 4; cfg.grad_accum = 8
+        else:
+            cfg.batch_size = 1; cfg.grad_accum = 32
+
+        if use_multi_gpu:
+            cfg.batch_size = cfg.batch_size * n_gpus
+            cfg.grad_accum = max(1, cfg.grad_accum // n_gpus)
+            print(f"  Multi-GPU:      ✓ DataParallel across {n_gpus} GPUs")
+
+        print(f"  [Auto] batch={cfg.batch_size}, accum={cfg.grad_accum}")
+    else:
+        print("  CPU mode (not recommended!)")
     print(f"  Model:          d={cfg.d_model}, layers={cfg.n_layers}, ff={cfg.d_ff}, heads={cfg.n_heads}")
     print(f"  Clusters:       {cfg.n_clusters}")
     print(f"  Effective batch: {cfg.batch_size} × {cfg.grad_accum} = {cfg.batch_size * cfg.grad_accum}")
@@ -321,6 +349,12 @@ def train(dataset_path: str, model_dir: str):
     model = NordModel(cfg).to(cfg.device)
     print(f"  [✓] {model.count_params()}")
 
+    # Multi-GPU wrapping
+    raw_model = model  # keep reference for saving
+    if use_multi_gpu:
+        model = DataParallel(model)
+        print(f"  [✓] DataParallel on GPUs: {list(range(n_gpus))}")
+
     # VRAM estimate
     if torch.cuda.is_available():
         allocated = torch.cuda.memory_allocated() / (1024**3)
@@ -335,7 +369,7 @@ def train(dataset_path: str, model_dir: str):
 
     # ── Checkpoints ──
     ckpt_mgr = CheckpointManager(model_dir)
-    start_step = ckpt_mgr.load(model, optimizer, scaler, cfg.device)
+    start_step = ckpt_mgr.load(raw_model, optimizer, scaler, cfg.device)
 
     # ── Training loop ──
     model.train()
@@ -417,14 +451,14 @@ def train(dataset_path: str, model_dir: str):
                 running_loss = 0.0
 
             if step > 0 and step % cfg.save_every == 0:
-                ckpt_mgr.save(model, optimizer, scaler, step, accum_loss, cfg)
+                ckpt_mgr.save(raw_model, optimizer, scaler, step, accum_loss, cfg)
 
     except KeyboardInterrupt:
         print(f"\n\n  [⏸] Stopped at step {step:,}")
-        ckpt_mgr.save(model, optimizer, scaler, step, accum_loss, cfg)
+        ckpt_mgr.save(raw_model, optimizer, scaler, step, accum_loss, cfg)
         print(f"  To resume — just run the script again.")
 
-    ckpt_mgr.save_final(model, cfg)
+    ckpt_mgr.save_final(raw_model, cfg)
 
     print(f"\n  {'═' * 55}")
     print(f"  Training complete!")
