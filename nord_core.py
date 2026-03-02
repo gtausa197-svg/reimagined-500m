@@ -54,12 +54,12 @@ class NordConfig:
     # ═══ FIX #1: Multi-Scale Temporal ═══
     T:             int = 8
     T_slow:        int = 2
-    persistent_mem: bool = False
+    persistent_mem: bool = True
 
     # LIF Neuron Dynamics
-    tau_mem:       float = 0.85
+    tau_mem:       float = 0.9
     tau_syn:       float = 0.50
-    v_threshold:   float = 0.12
+    v_threshold:   float = 0.25
     v_reset:       float = -0.1
     refractory_t:  int   = 2
     threshold_lr:  float = 0.01
@@ -273,7 +273,7 @@ class TemporalSpikeEncoder(nn.Module):
         nn.init.kaiming_uniform_(self.embed.weight, a=math.sqrt(5))
 
         self.temporal_proj = nn.Linear(D, D, bias=False)
-        self.drive_scale = nn.Parameter(torch.tensor(30.0))
+        self.drive_scale = nn.Parameter(torch.tensor(15.0))
 
         self.fast_basis = nn.Parameter(torch.randn(T, D) * 0.02)
         self.slow_basis = nn.Parameter(torch.randn(T_slow, D) * 0.02)

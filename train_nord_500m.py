@@ -7,14 +7,14 @@
 ║                                                                        ║
 ║  Hardware requirements:                                                ║
 ║      - NVIDIA L40 (48GB) or 4× RTX 3090 (24GB each)                   ║
-║      - ~20-30GB VRAM for training with batch_size=2, seq_len=512       ║
+║      - ~20-30GB VRAM for training with batch_size=8, seq_len=512       ║
 ║                                                                        ║
 ║  Changes from 144M:                                                    ║
 ║      - d_model: 512 → 1024                                            ║
 ║      - n_layers: 6 → 12                                               ║
 ║      - d_ff: 1024 → 4096                                              ║
 ║      - n_heads: 8 → 16                                                ║
-║      - batch_size: 4 → 2 (compensated with grad_accum=16)             ║
+║      - batch_size: 4 → 2 (compensated with grad_accum=4)             ║
 ║      - lr: 5e-4 → 3e-4 (lower for stability at scale)                ║
 ║      - warmup: 500 → 1000 steps                                       ║
 ╚══════════════════════════════════════════════════════════════════════════╝
@@ -276,9 +276,9 @@ def train(dataset_path: str, model_dir: str):
         persistent_mem=False,
         max_seq_len=512,
         # Training — adjusted for 500M
-        batch_size=2,
-        grad_accum=16,
-        lr=3e-4,           # lower lr for larger model
+        batch_size=8,
+        grad_accum=4,
+        lr=4e-4,           # lower lr for larger model
         warmup_steps=1000,  # longer warmup
         max_steps=200_000,
         save_every=1000,
@@ -291,7 +291,7 @@ def train(dataset_path: str, model_dir: str):
     print("═" * 60)
     print(f"  GPU:            {torch.cuda.get_device_name()}" if torch.cuda.is_available() else "  CPU mode")
     if torch.cuda.is_available():
-        vram = torch.cuda.get_device_properties(0).total_mem / (1024**3)
+        vram = torch.cuda.get_device_properties(0).total_memory / (1024**3)
         print(f"  VRAM:           {vram:.1f} GB")
     print(f"  Model:          d={cfg.d_model}, layers={cfg.n_layers}, ff={cfg.d_ff}, heads={cfg.n_heads}")
     print(f"  Clusters:       {cfg.n_clusters}")
